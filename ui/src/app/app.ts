@@ -76,6 +76,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   quality: string;
   format: string;
   folder!: string;
+  outputDir: string;
   customNamePrefix!: string;
   autoStart: boolean;
   playlistItemLimit!: number;
@@ -86,6 +87,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   ytdlOptionsPresets: string[] = [];
   ytdlOptionsOverrides: string;
   ytdlOptionPresetNames: string[] = [];
+  extraDownloadDirNames: string[] = [];
   addInProgress = false;
   cancelRequested = false;
   subscribeInProgress = false;
@@ -234,6 +236,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     this.chapterTemplate = this.cookieService.get('metube_chapter_template') || '';
     this.subtitleLanguage = this.cookieService.get('metube_subtitle_language') || 'en';
     this.subtitleMode = this.cookieService.get('metube_subtitle_mode') || 'prefer_manual';
+    this.outputDir = this.cookieService.get('metube_output_dir') || '';
     this.ytdlOptionsPresets = this.loadYtdlOptionsPresetsFromCookie();
     this.ytdlOptionsOverrides = this.cookieService.get('metube_ytdl_options_overrides') || '';
     const allowedDownloadTypes = new Set(this.downloadTypes.map(t => t.id));
@@ -375,14 +378,17 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     return this.downloads.customDirsChanged.asObservable().pipe(
        // eslint-disable-next-line @typescript-eslint/no-explicit-any
       map((output: any) => {
-        // Keep logic consistent with app/ytdl.py
+        if (this.outputDir) {
+          const key = `extra:${this.outputDir}`;
+          console.debug(`Showing extra download directories for: ${this.outputDir}`);
+          return output[key] || [];
+        }
         if (this.isAudioType()) {
           console.debug("Showing audio-specific download directories");
           return output["audio_download_dir"];
-        } else {
-          console.debug("Showing default download directories");
-          return output["download_dir"];
         }
+        console.debug("Showing default download directories");
+        return output["download_dir"];
       }),
       distinctUntilChanged((prev, curr) => JSON.stringify(prev) === JSON.stringify(curr))
     );
@@ -420,9 +426,19 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
             this.checkIntervalMinutes = dci;
           }
         }
+        const extraDirs = config['EXTRA_DOWNLOAD_DIR_NAMES'];
+        if (Array.isArray(extraDirs)) {
+          this.extraDownloadDirNames = extraDirs;
+        }
         this.cdr.markForCheck();
       }
     });
+  }
+
+  outputDirChanged() {
+    this.cookieService.set('metube_output_dir', this.outputDir, { expires: this.settingsCookieExpiryDays });
+    this.folder = '';
+    this.downloads.customDirsChanged.next(this.downloads.customDirs);
   }
 
   getYtdlOptionPresets() {
@@ -969,6 +985,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       quality: overrides.quality ?? this.quality,
       format: overrides.format ?? this.format,
       folder: overrides.folder ?? this.folder,
+      outputDir: overrides.outputDir ?? this.outputDir,
       customNamePrefix: overrides.customNamePrefix ?? this.customNamePrefix,
       playlistItemLimit: overrides.playlistItemLimit ?? this.playlistItemLimit,
       autoStart: overrides.autoStart ?? this.autoStart,
@@ -1042,6 +1059,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       quality: download.quality,
       format: download.format,
       folder: download.folder,
+      outputDir: download.output_dir || '',
       customNamePrefix: download.custom_name_prefix,
       playlistItemLimit: download.playlist_item_limit,
       autoStart: true,
@@ -1101,9 +1119,13 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   }
 
   buildDownloadLink(download: Download) {
-    let baseDir = this.downloads.configuration["PUBLIC_HOST_URL"];
-    if (download.download_type === 'audio' || download.filename.endsWith('.mp3')) {
-      baseDir = this.downloads.configuration["PUBLIC_HOST_AUDIO_URL"];
+    let baseDir: string;
+    if (download.output_dir) {
+      baseDir = `extra_download/${download.output_dir}/`;
+    } else if (download.download_type === 'audio' || download.filename.endsWith('.mp3')) {
+      baseDir = this.downloads.configuration["PUBLIC_HOST_AUDIO_URL"] as string;
+    } else {
+      baseDir = this.downloads.configuration["PUBLIC_HOST_URL"] as string;
     }
 
     if (download.folder) {
@@ -1125,9 +1147,13 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   }
 
   buildChapterDownloadLink(download: Download, chapterFilename: string) {
-    let baseDir = this.downloads.configuration["PUBLIC_HOST_URL"];
-    if (download.download_type === 'audio' || chapterFilename.endsWith('.mp3')) {
-      baseDir = this.downloads.configuration["PUBLIC_HOST_AUDIO_URL"];
+    let baseDir: string;
+    if (download.output_dir) {
+      baseDir = `extra_download/${download.output_dir}/`;
+    } else if (download.download_type === 'audio' || chapterFilename.endsWith('.mp3')) {
+      baseDir = this.downloads.configuration["PUBLIC_HOST_AUDIO_URL"] as string;
+    } else {
+      baseDir = this.downloads.configuration["PUBLIC_HOST_URL"] as string;
     }
 
     if (download.folder) {

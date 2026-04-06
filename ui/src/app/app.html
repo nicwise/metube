@@ -159,10 +159,10 @@
         </div>
       </div>
 
-      <!-- Options Row -->
+      <!-- Options Row 1: Type / Codec / Format -->
       <div class="row mb-3 g-3">
         @if (downloadType === 'video') {
-          <div class="col-md-3">
+          <div class="col-md-4">
             <div class="input-group">
               <span class="input-group-text">Type</span>
               <select class="form-select"
@@ -176,7 +176,7 @@
               </select>
             </div>
           </div>
-          <div class="col-md-3">
+          <div class="col-md-4">
             <div class="input-group">
               <span class="input-group-text">Codec</span>
               <select class="form-select"
@@ -190,7 +190,7 @@
               </select>
             </div>
           </div>
-          <div class="col-md-3">
+          <div class="col-md-4">
             <div class="input-group">
               <span class="input-group-text">Format</span>
               <select class="form-select"
@@ -204,22 +204,8 @@
               </select>
             </div>
           </div>
-          <div class="col-md-3">
-            <div class="input-group">
-              <span class="input-group-text">Quality</span>
-              <select class="form-select"
-                name="quality"
-                [(ngModel)]="quality"
-                (change)="qualityChanged()"
-                [disabled]="addInProgress || subscribeInProgress || downloads.loading || !showQualitySelector()">
-                @for (q of qualities; track q.id) {
-                  <option [ngValue]="q.id">{{ q.text }}</option>
-                }
-              </select>
-            </div>
-          </div>
         } @else if (downloadType === 'audio') {
-          <div class="col-md-4">
+          <div class="col-md-6">
             <div class="input-group">
               <span class="input-group-text">Type</span>
               <select class="form-select"
@@ -233,7 +219,7 @@
               </select>
             </div>
           </div>
-          <div class="col-md-4">
+          <div class="col-md-6">
             <div class="input-group">
               <span class="input-group-text">Format</span>
               <select class="form-select"
@@ -247,22 +233,7 @@
               </select>
             </div>
           </div>
-          <div class="col-md-4">
-            <div class="input-group">
-              <span class="input-group-text">Quality</span>
-              <select class="form-select"
-                name="quality"
-                [(ngModel)]="quality"
-                (change)="qualityChanged()"
-                [disabled]="addInProgress || subscribeInProgress || downloads.loading">
-                @for (q of qualities; track q.id) {
-                  <option [ngValue]="q.id">{{ q.text }}</option>
-                }
-              </select>
-            </div>
-          </div>
         } @else if (downloadType === 'captions') {
-          <!-- 4× col-md-3 is too tight at ~768px (long addons wrap the 4th field); 2×2 md–lg, one row lg+ -->
           <div class="col-12 col-md-6 col-lg-3">
             <div class="input-group">
               <span class="input-group-text">Type</span>
@@ -345,6 +316,42 @@
             <div class="input-group">
               <span class="input-group-text">Format</span>
               <input class="form-control" value="JPG" disabled>
+            </div>
+          </div>
+        }
+      </div>
+
+      <!-- Options Row 2: Quality / Output Dir -->
+      <div class="row mb-3 g-3">
+        <div class="col">
+          <div class="input-group">
+            <span class="input-group-text">Quality</span>
+            <select class="form-select"
+              name="quality"
+              [(ngModel)]="quality"
+              (change)="qualityChanged()"
+              [disabled]="addInProgress || subscribeInProgress || downloads.loading || !showQualitySelector()">
+              @for (q of qualities; track q.id) {
+                <option [ngValue]="q.id">{{ q.text }}</option>
+              }
+            </select>
+          </div>
+        </div>
+        @if (extraDownloadDirNames.length > 0) {
+          <div class="col">
+            <div class="input-group">
+              <span class="input-group-text">Output Dir</span>
+              <select class="form-select"
+                name="outputDir"
+                [(ngModel)]="outputDir"
+                (change)="outputDirChanged()"
+                [disabled]="addInProgress || subscribeInProgress || downloads.loading"
+                ngbTooltip="Choose which download directory to save files to">
+                <option value="">Default</option>
+                @for (dir of extraDownloadDirNames; track dir) {
+                  <option [value]="dir">{{ dir }}</option>
+                }
+              </select>
             </div>
           </div>
         }

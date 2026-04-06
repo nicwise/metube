@@ -13,6 +13,7 @@ export interface AddDownloadPayload {
   quality: string;
   format: string;
   folder: string;
+  outputDir: string;
   customNamePrefix: string;
   playlistItemLimit: number;
   autoStart: boolean;
@@ -136,6 +137,7 @@ export class DownloadsService {
       quality: payload.quality,
       format: payload.format,
       folder: payload.folder,
+      output_dir: payload.outputDir,
       custom_name_prefix: payload.customNamePrefix,
       playlist_item_limit: payload.playlistItemLimit,
       auto_start: payload.autoStart,

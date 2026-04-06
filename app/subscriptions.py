@@ -138,6 +138,7 @@ class SubscriptionInfo:
     format: str = "any"
     quality: str = "best"
     folder: str = ""
+    output_dir: str = ""
     custom_name_prefix: str = ""
     auto_start: bool = True
     playlist_item_limit: int = 0
@@ -185,6 +186,7 @@ def _subscription_to_record(sub: SubscriptionInfo) -> dict[str, Any]:
         "format": sub.format,
         "quality": sub.quality,
         "folder": sub.folder,
+        "output_dir": sub.output_dir,
         "custom_name_prefix": sub.custom_name_prefix,
         "auto_start": sub.auto_start,
         "playlist_item_limit": sub.playlist_item_limit,
@@ -340,6 +342,7 @@ class SubscriptionManager:
         format: str,
         quality: str,
         folder: str,
+        output_dir: str,
         custom_name_prefix: str,
         playlist_item_limit: int,
         auto_start: bool,
@@ -368,6 +371,7 @@ class SubscriptionManager:
                 format,
                 quality,
                 folder or None,
+                output_dir or '',
                 custom_name_prefix,
                 playlist_item_limit,
                 auto_start,
@@ -437,6 +441,7 @@ class SubscriptionManager:
         format: str,
         quality: str,
         folder: str,
+        output_dir: str,
         custom_name_prefix: str,
         auto_start: bool,
         playlist_item_limit: int,
@@ -496,6 +501,7 @@ class SubscriptionManager:
                 format=format,
                 quality=quality,
                 folder=folder or "",
+                output_dir=output_dir or "",
                 custom_name_prefix=custom_name_prefix or "",
                 auto_start=bool(auto_start),
                 playlist_item_limit=int(playlist_item_limit),
@@ -646,6 +652,7 @@ class SubscriptionManager:
             dl_format = cur.format
             dl_quality = cur.quality
             dl_folder = cur.folder
+            dl_output_dir = cur.output_dir
             dl_prefix = cur.custom_name_prefix
             dl_plimit = cur.playlist_item_limit
             dl_autostart = cur.auto_start
@@ -672,6 +679,7 @@ class SubscriptionManager:
             format=dl_format,
             quality=dl_quality,
             folder=dl_folder,
+            output_dir=dl_output_dir,
             custom_name_prefix=dl_prefix,
             playlist_item_limit=dl_plimit,
             auto_start=dl_autostart,

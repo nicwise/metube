@@ -180,6 +180,7 @@ class DownloadInfo:
         codec,
         format,
         folder,
+        output_dir,
         custom_name_prefix,
         error,
         entry,
@@ -199,6 +200,7 @@ class DownloadInfo:
         self.codec = codec
         self.format = format
         self.folder = folder
+        self.output_dir = output_dir
         self.custom_name_prefix = custom_name_prefix
         self.msg = self.percent = self.speed = self.eta = None
         self.status = "pending"
@@ -254,6 +256,8 @@ class DownloadInfo:
             self.codec = "auto"
         if not hasattr(self, "folder"):
             self.folder = ""
+        if not hasattr(self, "output_dir"):
+            self.output_dir = ""
         if not hasattr(self, "custom_name_prefix"):
             self.custom_name_prefix = ""
         if not hasattr(self, "playlist_item_limit"):
@@ -293,6 +297,7 @@ _PERSISTED_DOWNLOAD_FIELDS = (
     "codec",
     "format",
     "folder",
+    "output_dir",
     "custom_name_prefix",
     "playlist_item_limit",
     "split_by_chapters",
@@ -809,8 +814,13 @@ class DownloadQueue:
             **({'impersonate': yt_dlp.networking.impersonate.ImpersonateTarget.from_str(self.config.YTDL_OPTIONS['impersonate'])} if 'impersonate' in self.config.YTDL_OPTIONS else {}),
         }).extract_info(url, download=False)
 
-    def __calc_download_path(self, download_type, folder):
-        base_directory = self.config.AUDIO_DOWNLOAD_DIR if download_type == 'audio' else self.config.DOWNLOAD_DIR
+    def __calc_download_path(self, download_type, folder, output_dir=''):
+        if output_dir:
+            base_directory = self.config.EXTRA_DOWNLOAD_DIRS.get(output_dir)
+            if base_directory is None:
+                return None, {'status': 'error', 'msg': f'Unknown output directory "{output_dir}"'}
+        else:
+            base_directory = self.config.AUDIO_DOWNLOAD_DIR if download_type == 'audio' else self.config.DOWNLOAD_DIR
         if folder:
             if not self.config.CUSTOM_DIRS:
                 return None, {'status': 'error', 'msg': 'A folder for the download was specified but CUSTOM_DIRS is not true in the configuration.'}
@@ -827,7 +837,7 @@ class DownloadQueue:
         return dldirectory, None
 
     async def __add_download(self, dl, auto_start):
-        dldirectory, error_message = self.__calc_download_path(dl.download_type, dl.folder)
+        dldirectory, error_message = self.__calc_download_path(dl.download_type, dl.folder, getattr(dl, 'output_dir', ''))
         if error_message is not None:
             return error_message
         output = self.config.OUTPUT_TEMPLATE if len(dl.custom_name_prefix) == 0 else f'{dl.custom_name_prefix}.{self.config.OUTPUT_TEMPLATE}'
@@ -867,6 +877,7 @@ class DownloadQueue:
         format,
         quality,
         folder,
+        output_dir,
         custom_name_prefix,
         playlist_item_limit,
         auto_start,
@@ -901,6 +912,7 @@ class DownloadQueue:
                 format,
                 quality,
                 folder,
+                output_dir,
                 custom_name_prefix,
                 playlist_item_limit,
                 auto_start,
@@ -950,6 +962,7 @@ class DownloadQueue:
                         format,
                         quality,
                         folder,
+                        output_dir,
                         custom_name_prefix,
                         playlist_item_limit,
                         auto_start,
@@ -982,6 +995,7 @@ class DownloadQueue:
                     codec=codec,
                     format=format,
                     folder=folder,
+                    output_dir=output_dir,
                     custom_name_prefix=custom_name_prefix,
                     error=error,
                     entry=entry,
@@ -1005,6 +1019,7 @@ class DownloadQueue:
         format,
         quality,
         folder,
+        output_dir,
         custom_name_prefix,
         playlist_item_limit,
         auto_start=True,
@@ -1020,7 +1035,7 @@ class DownloadQueue:
         if ytdl_options_presets is None:
             ytdl_options_presets = []
         log.info(
-            f'adding {url}: {download_type=} {codec=} {format=} {quality=} {already=} {folder=} {custom_name_prefix=} '
+            f'adding {url}: {download_type=} {codec=} {format=} {quality=} {already=} {folder=} {output_dir=} {custom_name_prefix=} '
             f'{playlist_item_limit=} {auto_start=} {split_by_chapters=} {chapter_template=} '
             f'{subtitle_language=} {subtitle_mode=} {ytdl_options_presets=}'
         )
@@ -1044,6 +1059,7 @@ class DownloadQueue:
             format,
             quality,
             folder,
+            output_dir,
             custom_name_prefix,
             playlist_item_limit,
             auto_start,
@@ -1065,6 +1081,7 @@ class DownloadQueue:
         format,
         quality,
         folder,
+        output_dir,
         custom_name_prefix,
         playlist_item_limit,
         auto_start=True,
@@ -1086,6 +1103,7 @@ class DownloadQueue:
             format,
             quality,
             folder,
+            output_dir,
             custom_name_prefix,
             playlist_item_limit,
             auto_start,
@@ -1136,7 +1154,7 @@ class DownloadQueue:
             if self.config.DELETE_FILE_ON_TRASHCAN:
                 dl = self.done.get(id)
                 try:
-                    dldirectory, _ = self.__calc_download_path(dl.info.download_type, dl.info.folder)
+                    dldirectory, _ = self.__calc_download_path(dl.info.download_type, dl.info.folder, getattr(dl.info, 'output_dir', ''))
                     os.remove(os.path.join(dldirectory, dl.info.filename))
                 except Exception as e:
                     log.warning(f'deleting file for download {id} failed with error message {e!r}')

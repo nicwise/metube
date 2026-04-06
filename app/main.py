@@ -71,6 +71,7 @@ class Config:
         'MAX_CONCURRENT_DOWNLOADS': '3',
         'LOGLEVEL': 'INFO',
         'ENABLE_ACCESSLOG': 'false',
+        'EXTRA_DOWNLOAD_DIRS': '{}',
     }
 
     _BOOLEAN = ('DOWNLOAD_DIRS_INDEXABLE', 'CUSTOM_DIRS', 'CREATE_CUSTOM_DIRS', 'DELETE_FILE_ON_TRASHCAN', 'HTTPS', 'ENABLE_ACCESSLOG', 'ALLOW_YTDL_OPTIONS_OVERRIDES')
@@ -96,6 +97,14 @@ class Config:
             self.YTDL_OPTIONS_FILE = str(Path(self.YTDL_OPTIONS_FILE).resolve())
         if self.YTDL_OPTIONS_PRESETS_FILE and self.YTDL_OPTIONS_PRESETS_FILE.startswith('.'):
             self.YTDL_OPTIONS_PRESETS_FILE = str(Path(self.YTDL_OPTIONS_PRESETS_FILE).resolve())
+
+        try:
+            self.EXTRA_DOWNLOAD_DIRS = json.loads(os.environ.get('EXTRA_DOWNLOAD_DIRS', '{}'))
+            assert isinstance(self.EXTRA_DOWNLOAD_DIRS, dict)
+            assert all(isinstance(k, str) and isinstance(v, str) for k, v in self.EXTRA_DOWNLOAD_DIRS.items())
+        except (json.decoder.JSONDecodeError, AssertionError):
+            log.error('Environment variable EXTRA_DOWNLOAD_DIRS is invalid (must be a JSON object of string keys to string paths)')
+            sys.exit(1)
 
         self._runtime_overrides = {}
 
@@ -136,7 +145,9 @@ class Config:
         Sensitive or server-only keys (YTDL_OPTIONS, file-system paths, TLS
         settings, etc.) are intentionally excluded.
         """
-        return {k: getattr(self, k) for k in self._FRONTEND_KEYS}
+        result = {k: getattr(self, k) for k in self._FRONTEND_KEYS}
+        result['EXTRA_DOWNLOAD_DIR_NAMES'] = sorted(self.EXTRA_DOWNLOAD_DIRS.keys())
+        return result
 
     def load_ytdl_options(self) -> tuple[bool, str]:
         try:
@@ -450,6 +461,11 @@ def parse_download_options(post: dict) -> dict:
     if not url or not quality or not download_type:
         raise web.HTTPBadRequest(reason="missing 'url', 'download_type', or 'quality'")
     url = str(url).strip()
+    output_dir = post.get('output_dir', '')
+    if output_dir:
+        output_dir = str(output_dir).strip()
+        if output_dir and output_dir not in config.EXTRA_DOWNLOAD_DIRS:
+            raise web.HTTPBadRequest(reason=f'output_dir "{output_dir}" is not a configured extra download directory')
     folder = post.get('folder')
     custom_name_prefix = post.get('custom_name_prefix')
     playlist_item_limit = post.get('playlist_item_limit')
@@ -542,6 +558,7 @@ def parse_download_options(post: dict) -> dict:
         'format': format,
         'quality': quality,
         'folder': folder,
+        'output_dir': output_dir,
         'custom_name_prefix': custom_name_prefix,
         'playlist_item_limit': playlist_item_limit,
         'auto_start': auto_start,
@@ -578,6 +595,7 @@ async def add(request):
         o['format'],
         o['quality'],
         o['folder'],
+        o['output_dir'],
         o['custom_name_prefix'],
         o['playlist_item_limit'],
         o['auto_start'],
@@ -629,6 +647,7 @@ async def subscribe(request):
         format=o['format'],
         quality=o['quality'],
         folder=o['folder'] or '',
+        output_dir=o['output_dir'] or '',
         custom_name_prefix=o['custom_name_prefix'],
         auto_start=o['auto_start'],
         playlist_item_limit=o['playlist_item_limit'],
@@ -798,6 +817,7 @@ def get_custom_dirs():
         config.DOWNLOAD_DIR,
         config.AUDIO_DOWNLOAD_DIR,
         config.CUSTOM_DIRS_EXCLUDE_REGEX,
+        tuple(sorted(config.EXTRA_DOWNLOAD_DIRS.items())),
     )
     if (
         hasattr(get_custom_dirs, "_cache_key")
@@ -846,8 +866,10 @@ def get_custom_dirs():
 
     result = {
         "download_dir": download_dir,
-        "audio_download_dir": audio_download_dir
+        "audio_download_dir": audio_download_dir,
     }
+    for name, path in config.EXTRA_DOWNLOAD_DIRS.items():
+        result[f"extra:{name}"] = recursive_dirs(path)
     get_custom_dirs._cache_key = cache_key
     get_custom_dirs._cache_time = now
     get_custom_dirs._cache_value = result
@@ -866,7 +888,7 @@ async def robots(request):
         response = web.FileResponse(os.path.join(config.BASE_DIR, config.ROBOTS_TXT))
     else:
         response = web.Response(
-            text="User-agent: *\nDisallow: /download/\nDisallow: /audio_download/\n"
+            text="User-agent: *\nDisallow: /download/\nDisallow: /audio_download/\nDisallow: /extra_download/\n"
         )
     return response
 
@@ -888,6 +910,8 @@ if config.URL_PREFIX != '/':
 
 routes.static(config.URL_PREFIX + 'download/', config.DOWNLOAD_DIR, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
 routes.static(config.URL_PREFIX + 'audio_download/', config.AUDIO_DOWNLOAD_DIR, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
+for name, path in config.EXTRA_DOWNLOAD_DIRS.items():
+    routes.static(config.URL_PREFIX + f'extra_download/{name}/', path, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
 routes.static(config.URL_PREFIX, os.path.join(config.BASE_DIR, 'ui/dist/metube/browser'))
 try:
     app.add_routes(routes)

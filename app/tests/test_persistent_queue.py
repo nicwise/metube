@@ -54,6 +54,7 @@ def _make_info(url: str = "https://example.com/v") -> DownloadInfo:
         codec="auto",
         format="any",
         folder="",
+        output_dir="",
         custom_name_prefix="",
         error=None,
         entry=None,
