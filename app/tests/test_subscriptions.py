@@ -453,6 +453,283 @@ class SubscriptionPersistenceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await mgr.update_subscription(sub_id, {"enabled": "maybe"})
 
+    async def test_add_subscription_rejects_invalid_title_regex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                return_value=(
+                    {"_type": "channel", "title": "Channel"},
+                    [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                ),
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                    title_regex="[",
+                )
+            self.assertEqual(result["status"], "error")
+            self.assertIn("title_regex", result["msg"].lower())
+            self.assertEqual(mgr.list_all(), [])
+
+    async def test_add_subscription_stores_and_exposes_title_regex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                return_value=(
+                    {"_type": "channel", "title": "Channel"},
+                    [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                ),
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                    title_regex="EPISODE",
+                )
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["subscription"]["title_regex"], "EPISODE")
+            self.assertEqual(mgr.list_all()[0].title_regex, "EPISODE")
+
+    async def test_check_now_title_regex_queues_only_matches_and_marks_unmatched_seen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                side_effect=[
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [{"id": "v1", "title": "Old", "webpage_url": "https://example.com/v1"}],
+                    ),
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [
+                            {
+                                "id": "v2",
+                                "title": "Minecraft | EPISODE 1",
+                                "webpage_url": "https://example.com/v2",
+                            },
+                            {
+                                "id": "v3",
+                                "title": "Unrelated IRL",
+                                "webpage_url": "https://example.com/v3",
+                            },
+                            {
+                                "id": "v1",
+                                "title": "Old",
+                                "webpage_url": "https://example.com/v1",
+                            },
+                        ],
+                    ),
+                ],
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                    title_regex="EPISODE",
+                )
+                await mgr.check_now([result["subscription"]["id"]])
+            self.assertEqual([e["webpage_url"] for e, _, _ in queue.entries], ["https://example.com/v2"])
+            sub = mgr.list_all()[0]
+            self.assertEqual(sub.seen_ids[:3], ["v2", "v3", "v1"])
+
+    async def test_check_now_title_regex_queue_failure_keeps_matched_id_unseen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                side_effect=[
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [{"id": "v1", "title": "Old", "webpage_url": "https://example.com/v1"}],
+                    ),
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [
+                            {
+                                "id": "v2",
+                                "title": "Show | EPISODE 1",
+                                "webpage_url": "https://example.com/v2",
+                            },
+                            {
+                                "id": "v3",
+                                "title": "Other",
+                                "webpage_url": "https://example.com/v3",
+                            },
+                        ],
+                    ),
+                ],
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                    title_regex="EPISODE",
+                )
+                queue.fail = True
+                await mgr.check_now([result["subscription"]["id"]])
+            sub = mgr.list_all()[0]
+            self.assertEqual(sub.error, "queue failed")
+            self.assertEqual(set(sub.seen_ids), {"v1", "v3"})
+            self.assertNotIn("v2", sub.seen_ids)
+
+    async def test_update_subscription_rejects_invalid_title_regex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                return_value=(
+                    {"_type": "channel", "title": "Channel"},
+                    [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                ),
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                )
+            sub_id = result["subscription"]["id"]
+            upd = await mgr.update_subscription(sub_id, {"title_regex": "("})
+            self.assertEqual(upd["status"], "error")
+            self.assertEqual(mgr.list_all()[0].title_regex, "")
+
+    async def test_update_subscription_persists_valid_title_regex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                return_value=(
+                    {"_type": "channel", "title": "Channel"},
+                    [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                ),
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                )
+            sub_id = result["subscription"]["id"]
+            upd = await mgr.update_subscription(sub_id, {"title_regex": "foo|bar"})
+            self.assertEqual(upd["status"], "ok")
+            self.assertEqual(upd["subscription"]["title_regex"], "foo|bar")
+            self.assertEqual(mgr.list_all()[0].title_regex, "foo|bar")
+
+    def test_persistence_includes_title_regex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = os.path.join(tmp, "subscriptions.json")
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "schema_version": 2,
+                        "kind": "subscriptions",
+                        "items": [
+                            {
+                                "id": "sub-1",
+                                "name": "Channel",
+                                "url": "https://example.com/channel",
+                                "enabled": True,
+                                "check_interval_minutes": 60,
+                                "download_type": "video",
+                                "codec": "auto",
+                                "format": "any",
+                                "quality": "best",
+                                "folder": "",
+                                "custom_name_prefix": "",
+                                "auto_start": True,
+                                "playlist_item_limit": 0,
+                                "split_by_chapters": False,
+                                "chapter_template": "",
+                                "subtitle_language": "en",
+                                "subtitle_mode": "prefer_manual",
+                                "ytdl_options_presets": [],
+                                "ytdl_options_overrides": {},
+                                "title_regex": "EPISODE",
+                                "last_checked": None,
+                                "seen_ids": [],
+                                "error": None,
+                            }
+                        ],
+                    },
+                    f,
+                )
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            self.assertEqual(mgr.list_all()[0].title_regex, "EPISODE")
+
+
 class ExtractFlatPlaylistTests(unittest.TestCase):
     def test_descends_one_level_when_root_entries_are_nested_collections(self):
         responses = iter(

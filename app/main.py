@@ -645,6 +645,7 @@ async def subscribe(request):
         subtitle_mode=o['subtitle_mode'],
         ytdl_options_presets=o['ytdl_options_presets'],
         ytdl_options_overrides=o['ytdl_options_overrides'],
+        title_regex=post.get('title_regex'),
     )
     return web.Response(text=serializer.encode(result))
 
@@ -660,7 +661,11 @@ async def subscriptions_update(request):
     sub_id = post.get('id')
     if not sub_id:
         raise web.HTTPBadRequest(reason='missing subscription id')
-    changes = {k: v for k, v in post.items() if k != 'id' and k in ('enabled', 'check_interval_minutes', 'name')}
+    changes = {
+        k: v
+        for k, v in post.items()
+        if k != 'id' and k in ('enabled', 'check_interval_minutes', 'name', 'title_regex')
+    }
     if not changes:
         raise web.HTTPBadRequest(reason='no valid fields to update')
     log.info("Subscription update requested for %s: %s", sub_id, sorted(changes.keys()))

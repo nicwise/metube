@@ -90,6 +90,9 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   cancelRequested = false;
   subscribeInProgress = false;
   checkIntervalMinutes = 60;
+  titleRegex = '';
+  editingTitleRegexId: string | null = null;
+  titleRegexEditDraft = '';
   cachedSubs: [string, SubscriptionRow][] = [];
   selectedSubscriptionIds = new Set<string>();
   checkingSubscriptionIds = new Set<string>();
@@ -560,6 +563,15 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       alert('Please enter a URL');
       return;
     }
+    const tr = (this.titleRegex || '').trim();
+    if (tr) {
+      try {
+        void RegExp(tr);
+      } catch {
+        alert('Invalid subscription title filter (regex)');
+        return;
+      }
+    }
     if (payload.splitByChapters && !payload.chapterTemplate.includes('%(section_number)')) {
       alert('Chapter template must include %(section_number)');
       return;
@@ -572,6 +584,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       .subscribe({
         ...payload,
         checkIntervalMinutes: this.checkIntervalMinutes,
+        titleRegex: tr,
       })
       .pipe(
         takeUntilDestroyed(this.destroyRef),
@@ -587,9 +600,42 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
             alert(r.msg || 'Subscribe failed');
           } else {
             this.addUrl = '';
+            this.titleRegex = '';
           }
         },
       });
+  }
+
+  beginEditTitleRegex(id: string, current: string | undefined) {
+    this.editingTitleRegexId = id;
+    this.titleRegexEditDraft = current ?? '';
+    this.cdr.markForCheck();
+  }
+
+  cancelEditTitleRegex() {
+    this.editingTitleRegexId = null;
+    this.titleRegexEditDraft = '';
+    this.cdr.markForCheck();
+  }
+
+  saveTitleRegex(id: string) {
+    const raw = (this.titleRegexEditDraft || '').trim();
+    if (raw) {
+      try {
+        void RegExp(raw);
+      } catch {
+        alert('Invalid subscription title filter (regex)');
+        return;
+      }
+    }
+    this.subscriptionsSvc.update(id, { title_regex: raw }).subscribe((res) => {
+      const error = this.getStatusError(res);
+      if (error) {
+        alert(error || 'Update subscription failed');
+        return;
+      }
+      this.cancelEditTitleRegex();
+    });
   }
 
   deleteSubscription(id: string) {
