@@ -9,6 +9,7 @@ from collections import OrderedDict
 import time
 import asyncio
 import multiprocessing
+from functools import partial
 import logging
 import re
 import types
@@ -19,6 +20,7 @@ from yt_dlp.utils import STR_FORMAT_RE_TMPL, STR_FORMAT_TYPES
 from dl_formats import get_format, get_opts, AUDIO_FORMATS
 from datetime import datetime
 from state_store import AtomicJsonStore, from_json_compatible, read_legacy_shelf, to_json_compatible
+from subscriptions import _entry_id
 
 log = logging.getLogger('ytdl')
 
@@ -191,6 +193,8 @@ class DownloadInfo:
         subtitle_mode="prefer_manual",
         ytdl_options_presets=None,
         ytdl_options_overrides=None,
+        clip_start=None,
+        clip_end=None,
     ):
         self.id = id if len(custom_name_prefix) == 0 else f'{custom_name_prefix}.{id}'
         self.title = title if len(custom_name_prefix) == 0 else f'{custom_name_prefix}.{title}'
@@ -216,6 +220,8 @@ class DownloadInfo:
         self.subtitle_mode = subtitle_mode
         self.ytdl_options_presets = list(ytdl_options_presets or [])
         self.ytdl_options_overrides = dict(ytdl_options_overrides or {})
+        self.clip_start = clip_start
+        self.clip_end = clip_end
         self.subtitle_files = []
 
     def __setstate__(self, state):
@@ -286,6 +292,10 @@ class DownloadInfo:
             self.subtitle_files = []
         if not hasattr(self, "chapter_files"):
             self.chapter_files = []
+        if not hasattr(self, "clip_start"):
+            self.clip_start = None
+        if not hasattr(self, "clip_end"):
+            self.clip_end = None
 
 
 _PERSISTED_DOWNLOAD_FIELDS = (
@@ -306,6 +316,8 @@ _PERSISTED_DOWNLOAD_FIELDS = (
     "subtitle_mode",
     "ytdl_options_presets",
     "ytdl_options_overrides",
+    "clip_start",
+    "clip_end",
     "status",
     "timestamp",
     "error",
@@ -475,6 +487,16 @@ class Download:
                     'key': 'FFmpegSplitChapters',
                     'force_keyframes': False
                 })
+
+            clip_start = getattr(self.info, 'clip_start', None)
+            clip_end = getattr(self.info, 'clip_end', None)
+            if clip_start is not None or clip_end is not None:
+                start = float(clip_start) if clip_start is not None else 0.0
+                end = float(clip_end) if clip_end is not None else float('inf')
+                ytdl_params['download_ranges'] = yt_dlp.utils.download_range_func(
+                    None,
+                    [(start, end)],
+                )
 
             ret = yt_dlp.YoutubeDL(params=ytdl_params).download([self.info.url])
             self.status_queue.put({'status': 'finished' if ret == 0 else 'error'})
@@ -800,9 +822,19 @@ class DownloadQueue:
             log.debug(f'Auto-clearing completed download: {url}')
             await self.clear([url])
 
-    def __extract_info(self, url):
+    def _build_ytdl_options(self, ytdl_options_presets=None, ytdl_options_overrides=None):
+        """Merge global options, presets (in order), and per-download overrides."""
+        opts = dict(self.config.YTDL_OPTIONS)
+        for preset_name in ytdl_options_presets or []:
+            opts.update(self.config.YTDL_OPTIONS_PRESETS.get(preset_name, {}))
+        opts.update(ytdl_options_overrides or {})
+        return opts
+
+    def __extract_info(self, url, ytdl_options_presets=None, ytdl_options_overrides=None):
         debug_logging = logging.getLogger().isEnabledFor(logging.DEBUG)
-        return yt_dlp.YoutubeDL(params={
+        user_opts = self._build_ytdl_options(ytdl_options_presets, ytdl_options_overrides)
+        params = {
+            **user_opts,
             'quiet': not debug_logging,
             'verbose': debug_logging,
             'no_color': True,
@@ -810,9 +842,11 @@ class DownloadQueue:
             'ignore_no_formats_error': True,
             'noplaylist': True,
             'paths': {"home": self.config.DOWNLOAD_DIR, "temp": self.config.TEMP_DIR},
-            **self.config.YTDL_OPTIONS,
-            **({'impersonate': yt_dlp.networking.impersonate.ImpersonateTarget.from_str(self.config.YTDL_OPTIONS['impersonate'])} if 'impersonate' in self.config.YTDL_OPTIONS else {}),
-        }).extract_info(url, download=False)
+        }
+        imp = user_opts.get('impersonate')
+        if imp is not None:
+            params['impersonate'] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str(imp)
+        return yt_dlp.YoutubeDL(params=params).extract_info(url, download=False)
 
     def __calc_download_path(self, download_type, folder, output_dir=''):
         if output_dir:
@@ -853,10 +887,10 @@ class DownloadQueue:
                 output = self.config.OUTPUT_TEMPLATE_CHANNEL
             sanitized = {k: _sanitize_path_component(v) for k, v in entry.items()}
             output = _resolve_outtmpl_fields(output, sanitized, ('channel',))
-        ytdl_options = dict(self.config.YTDL_OPTIONS)
-        for preset_name in getattr(dl, 'ytdl_options_presets', None) or []:
-            ytdl_options.update(self.config.YTDL_OPTIONS_PRESETS.get(preset_name, {}))
-        ytdl_options.update(getattr(dl, 'ytdl_options_overrides', {}) or {})
+        ytdl_options = self._build_ytdl_options(
+            getattr(dl, 'ytdl_options_presets', None),
+            getattr(dl, 'ytdl_options_overrides', {}) or {},
+        )
         playlist_item_limit = getattr(dl, 'playlist_item_limit', 0)
         if playlist_item_limit > 0:
             log.info(f'playlist limit is set. Processing only first {playlist_item_limit} entries')
@@ -887,6 +921,8 @@ class DownloadQueue:
         subtitle_mode,
         ytdl_options_presets,
         ytdl_options_overrides,
+        clip_start,
+        clip_end,
         already,
         _add_gen=None,
     ):
@@ -922,6 +958,8 @@ class DownloadQueue:
                 subtitle_mode,
                 ytdl_options_presets,
                 ytdl_options_overrides,
+                clip_start,
+                clip_end,
                 already,
                 _add_gen,
             )
@@ -942,6 +980,8 @@ class DownloadQueue:
                 if _add_gen is not None and self._add_generation != _add_gen:
                     log.info(f'Playlist add canceled after processing {len(already)} entries')
                     return {'status': 'ok', 'msg': f'Canceled - added {len(already)} items before cancel'}
+                if "id" not in etr:
+                    etr["id"] = _entry_id(etr)
                 etr["_type"] = "video"
                 etr[etype] = entry.get("id") or entry.get("channel_id") or entry.get("channel")
                 etr[f"{etype}_index"] = '{{0:0{0:d}d}}'.format(index_digits).format(index)
@@ -972,6 +1012,8 @@ class DownloadQueue:
                         subtitle_mode,
                         ytdl_options_presets,
                         ytdl_options_overrides,
+                        clip_start,
+                        clip_end,
                         already,
                         _add_gen,
                     )
@@ -1006,6 +1048,8 @@ class DownloadQueue:
                     subtitle_mode=subtitle_mode,
                     ytdl_options_presets=ytdl_options_presets,
                     ytdl_options_overrides=ytdl_options_overrides,
+                    clip_start=clip_start,
+                    clip_end=clip_end,
                 )
                 await self.__add_download(dl, auto_start)
             return {'status': 'ok'}
@@ -1029,6 +1073,8 @@ class DownloadQueue:
         subtitle_mode="prefer_manual",
         ytdl_options_presets=None,
         ytdl_options_overrides=None,
+        clip_start=None,
+        clip_end=None,
         already=None,
         _add_gen=None,
     ):
@@ -1037,7 +1083,7 @@ class DownloadQueue:
         log.info(
             f'adding {url}: {download_type=} {codec=} {format=} {quality=} {already=} {folder=} {output_dir=} {custom_name_prefix=} '
             f'{playlist_item_limit=} {auto_start=} {split_by_chapters=} {chapter_template=} '
-            f'{subtitle_language=} {subtitle_mode=} {ytdl_options_presets=}'
+            f'{subtitle_language=} {subtitle_mode=} {ytdl_options_presets=} {clip_start=} {clip_end=}'
         )
         if already is None:
             _add_gen = self._add_generation
@@ -1049,7 +1095,10 @@ class DownloadQueue:
         else:
             already.add(url)
         try:
-            entry = await asyncio.get_running_loop().run_in_executor(None, self.__extract_info, url)
+            entry = await asyncio.get_running_loop().run_in_executor(
+                None,
+                partial(self.__extract_info, url, ytdl_options_presets, ytdl_options_overrides),
+            )
         except yt_dlp.utils.YoutubeDLError as exc:
             return {'status': 'error', 'msg': str(exc)}
         return await self.__add_entry(
@@ -1069,6 +1118,8 @@ class DownloadQueue:
             subtitle_mode,
             ytdl_options_presets,
             ytdl_options_overrides,
+            clip_start,
+            clip_end,
             already,
             _add_gen,
         )
@@ -1091,6 +1142,8 @@ class DownloadQueue:
         subtitle_mode="prefer_manual",
         ytdl_options_presets=None,
         ytdl_options_overrides=None,
+        clip_start=None,
+        clip_end=None,
     ):
         if ytdl_options_presets is None:
             ytdl_options_presets = []
@@ -1113,6 +1166,8 @@ class DownloadQueue:
             subtitle_mode,
             ytdl_options_presets,
             ytdl_options_overrides,
+            clip_start,
+            clip_end,
             already,
             None,
         )
@@ -1139,9 +1194,11 @@ class DownloadQueue:
             if not self.queue.exists(id):
                 log.warning(f'requested cancel for non-existent download {id}')
                 continue
-            if self.queue.get(id).started():
-                self.queue.get(id).cancel()
+            dl = self.queue.get(id)
+            if dl.started():
+                dl.cancel()
             else:
+                dl.canceled = True
                 self.queue.delete(id)
                 await self.notifier.canceled(id)
         return {'status': 'ok'}

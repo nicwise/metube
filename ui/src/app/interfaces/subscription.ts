@@ -9,6 +9,7 @@ export interface SubscriptionRow {
   format: string;
   quality: string;
   folder: string;
+  title_regex?: string;
   last_checked: number | null;
   seen_count: number;
   error: string | null;

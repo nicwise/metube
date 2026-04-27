@@ -23,6 +23,8 @@ export interface AddDownloadPayload {
   subtitleMode: string;
   ytdlOptionsPresets: string[];
   ytdlOptionsOverrides: string;
+  clipStart?: string;
+  clipEnd?: string;
 }
 @Injectable({
   providedIn: 'root'
@@ -130,7 +132,7 @@ export class DownloadsService {
   }
 
   public add(payload: AddDownloadPayload) {
-    return this.http.post<Status>('add', {
+    const body: Record<string, unknown> = {
       url: payload.url,
       download_type: payload.downloadType,
       codec: payload.codec,
@@ -147,7 +149,12 @@ export class DownloadsService {
       subtitle_mode: payload.subtitleMode,
       ytdl_options_presets: payload.ytdlOptionsPresets,
       ytdl_options_overrides: payload.ytdlOptionsOverrides,
-    }).pipe(
+    };
+    const cs = payload.clipStart?.trim();
+    const ce = payload.clipEnd?.trim();
+    if (cs) body['clip_start'] = cs;
+    if (ce) body['clip_end'] = ce;
+    return this.http.post<Status>('add', body).pipe(
       catchError(this.handleHTTPError)
     );
   }

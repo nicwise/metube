@@ -23,6 +23,47 @@ class ConfigTests(unittest.TestCase):
             c = Config()
         self.assertEqual(c.URL_PREFIX, "foo/")
 
+    def test_public_host_url_gets_trailing_slash(self):
+        with patch.dict(
+            os.environ,
+            _base_env(PUBLIC_HOST_URL="https://ytdl.example.com"),
+            clear=False,
+        ):
+            c = Config()
+        self.assertEqual(c.PUBLIC_HOST_URL, "https://ytdl.example.com/")
+
+    def test_public_host_audio_url_gets_trailing_slash(self):
+        with patch.dict(
+            os.environ,
+            _base_env(PUBLIC_HOST_AUDIO_URL="https://audio.example.com"),
+            clear=False,
+        ):
+            c = Config()
+        self.assertEqual(c.PUBLIC_HOST_AUDIO_URL, "https://audio.example.com/")
+
+    def test_public_host_url_empty_stays_empty(self):
+        with patch.dict(
+            os.environ,
+            _base_env(PUBLIC_HOST_URL="", PUBLIC_HOST_AUDIO_URL=""),
+            clear=False,
+        ):
+            c = Config()
+        self.assertEqual(c.PUBLIC_HOST_URL, "")
+        self.assertEqual(c.PUBLIC_HOST_AUDIO_URL, "")
+
+    def test_public_host_url_already_slashed_unchanged(self):
+        with patch.dict(
+            os.environ,
+            _base_env(
+                PUBLIC_HOST_URL="https://ytdl.example.com/",
+                PUBLIC_HOST_AUDIO_URL="https://audio.example.com/",
+            ),
+            clear=False,
+        ):
+            c = Config()
+        self.assertEqual(c.PUBLIC_HOST_URL, "https://ytdl.example.com/")
+        self.assertEqual(c.PUBLIC_HOST_AUDIO_URL, "https://audio.example.com/")
+
     def test_ytdl_options_json_loaded(self):
         opts = {"quiet": True, "no_warnings": True}
         with patch.dict(

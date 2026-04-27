@@ -6,6 +6,7 @@ import asyncio
 import copy
 import logging
 import os
+import re
 import time
 import types
 import uuid
@@ -148,6 +149,7 @@ class SubscriptionInfo:
     subtitle_mode: str = "prefer_manual"
     ytdl_options_presets: list[str] = field(default_factory=list)
     ytdl_options_overrides: dict[str, Any] = field(default_factory=dict)
+    title_regex: str = ""
     last_checked: Optional[float] = None
     seen_ids: list[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -168,6 +170,7 @@ class SubscriptionInfo:
             "format": self.format,
             "quality": self.quality,
             "folder": self.folder,
+            "title_regex": self.title_regex,
             "last_checked": self.last_checked,
             "seen_count": len(self.seen_ids),
             "error": self.error,
@@ -196,6 +199,7 @@ def _subscription_to_record(sub: SubscriptionInfo) -> dict[str, Any]:
         "subtitle_mode": sub.subtitle_mode,
         "ytdl_options_presets": list(sub.ytdl_options_presets),
         "ytdl_options_overrides": sub.ytdl_options_overrides,
+        "title_regex": sub.title_regex,
         "last_checked": sub.last_checked,
         "seen_ids": list(sub.seen_ids),
         "error": sub.error,
@@ -231,6 +235,22 @@ def _subscription_from_record(record: Any) -> Optional[SubscriptionInfo]:
         except TypeError:
             return None
     return None
+
+
+def _normalize_title_regex_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def validate_title_regex(value: Any) -> str:
+    """Return stored title regex string; non-empty values must compile (re.error on failure)."""
+    s = _normalize_title_regex_value(value)
+    if s:
+        re.compile(s)
+    return s
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -362,6 +382,8 @@ class SubscriptionManager:
             if not eid or not vurl:
                 continue
             queue_entry = dict(ent)
+            if "id" not in queue_entry:
+                queue_entry["id"] = eid
             queue_entry["_type"] = "video"
             queue_entry["webpage_url"] = vurl
             result = await self.dqueue.add_entry(
@@ -451,10 +473,15 @@ class SubscriptionManager:
         subtitle_mode: str,
         ytdl_options_presets: Optional[list[str]] = None,
         ytdl_options_overrides: Optional[dict[str, Any]] = None,
+        title_regex: Any = None,
     ) -> dict:
         url = self._normalize_url(url)
         if not url:
             return {"status": "error", "msg": "Missing URL"}
+        try:
+            title_regex_stored = validate_title_regex(title_regex)
+        except re.error as exc:
+            return {"status": "error", "msg": f"Invalid title_regex: {exc}"}
 
         async with self._lock:
             if url in self._url_index or url in self._pending_urls:
@@ -486,6 +513,8 @@ class SubscriptionManager:
             seen_entries = [ent for ent in entries if _is_media_entry(ent)]
             all_ids: list[str] = []
             for ent in seen_entries:
+                if ent.get("live_status") == "is_upcoming":
+                    continue  # Don't mark scheduled streams as seen; queue them when they go live
                 eid = _entry_id(ent)
                 if eid:
                     all_ids.append(eid)
@@ -511,6 +540,7 @@ class SubscriptionManager:
                 subtitle_mode=subtitle_mode,
                 ytdl_options_presets=list(ytdl_options_presets or []),
                 ytdl_options_overrides=dict(ytdl_options_overrides or {}),
+                title_regex=title_regex_stored,
                 last_checked=time.time(),
                 seen_ids=list(dict.fromkeys(all_ids)),
                 error=None,
@@ -557,6 +587,13 @@ class SubscriptionManager:
         return {"status": "ok"}
 
     async def update_subscription(self, sub_id: str, changes: dict) -> dict:
+        validated_tr: Optional[str] = None
+        if "title_regex" in changes:
+            try:
+                validated_tr = validate_title_regex(changes["title_regex"])
+            except re.error as exc:
+                return {"status": "error", "msg": f"Invalid title_regex: {exc}"}
+
         async with self._lock:
             sub = self._subs.get(sub_id)
             if not sub:
@@ -570,6 +607,8 @@ class SubscriptionManager:
                 sub.check_interval_minutes = max(1, int(changes["check_interval_minutes"]))
             if "name" in changes and changes["name"]:
                 sub.name = str(changes["name"])
+            if validated_tr is not None:
+                sub.title_regex = validated_tr
 
             try:
                 self._save_locked()
@@ -662,18 +701,41 @@ class SubscriptionManager:
             dl_submode = cur.subtitle_mode
             dl_ytdl_presets = list(cur.ytdl_options_presets)
             dl_ytdl_overrides = dict(cur.ytdl_options_overrides)
+            dl_title_regex = cur.title_regex or ""
 
         new_entries: list[dict] = []
-        new_ids: list[str] = []
         for ent in entries:
             eid = _entry_id(ent)
-            if not eid or eid in seen:
+            if not eid:
+                continue
+            if eid in seen and ent.get("live_status") != "is_live":
                 continue
             new_entries.append(ent)
-            new_ids.append(eid)
+
+        pattern_re: Optional[re.Pattern[str]] = None
+        if dl_title_regex:
+            try:
+                pattern_re = re.compile(dl_title_regex)
+            except re.error:
+                log.warning(
+                    "Invalid stored title_regex on subscription %s, ignoring filter",
+                    sub.name,
+                )
+
+        queue_entries: list[dict] = []
+        filtered_ids: list[str] = []
+        for ent in new_entries:
+            eid = _entry_id(ent)
+            if pattern_re is not None:
+                title = str(ent.get("title") or "")
+                if not pattern_re.search(title):
+                    if eid:
+                        filtered_ids.append(eid)
+                    continue
+            queue_entries.append(ent)
 
         queued_ids, queue_errors = await self._queue_subscription_entries(
-            new_entries,
+            queue_entries,
             download_type=dl_type,
             codec=dl_codec,
             format=dl_format,
@@ -691,14 +753,15 @@ class SubscriptionManager:
             ytdl_options_overrides=dl_ytdl_overrides,
         )
         log.info(
-            "Subscription check finished for %s: %d new, %d queued, %d failed",
+            "Subscription check finished for %s: %d new, %d filtered, %d queued, %d failed",
             sub.name,
             len(new_entries),
+            len(filtered_ids),
             len(queued_ids),
             len(queue_errors),
         )
 
-        merged = list(dict.fromkeys(queued_ids + seen_ids_snapshot))
+        merged = list(dict.fromkeys(queued_ids + filtered_ids + seen_ids_snapshot))
         max_seen = int(getattr(self.config, "SUBSCRIPTION_MAX_SEEN_IDS", 50000))
         if len(merged) > max_seen:
             merged = merged[:max_seen]

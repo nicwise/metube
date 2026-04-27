@@ -279,3 +279,30 @@ async def test_add_legacy_format_migrated(mock_dqueue):
     call = mock_dqueue.add.await_args
     assert call is not None
     assert call.args[1] == "audio"
+
+
+@pytest.mark.asyncio
+async def test_add_passes_clip_bounds_to_queue(mock_dqueue):
+    req = _json_request(
+        _valid_video_add_body(clip_start="2:26", clip_end="3:24"),
+    )
+    resp = await main.add(req)
+    assert resp.status == 200
+    call = mock_dqueue.add.await_args
+    assert call is not None
+    assert call.args[15] == pytest.approx(146.0)
+    assert call.args[16] == pytest.approx(204.0)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_rejects_clip_options(mock_dqueue, monkeypatch):
+    monkeypatch.setattr(main.submgr, "add_subscription", AsyncMock())
+    req = _json_request(
+        {
+            **_valid_video_add_body(clip_start="10"),
+            "check_interval_minutes": 60,
+        }
+    )
+    with pytest.raises(web.HTTPBadRequest):
+        await main.subscribe(req)
+    main.submgr.add_subscription.assert_not_awaited()

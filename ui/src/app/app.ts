@@ -1,7 +1,7 @@
 import { AsyncPipe, DatePipe, KeyValuePipe, NgTemplateOutlet } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { AfterViewInit, ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, ElementRef, viewChild, inject, OnDestroy, OnInit } from '@angular/core';
-import { Observable, Subscription, map, distinctUntilChanged, finalize } from 'rxjs';
+import { Observable, Subject, Subscription, from, map, distinctUntilChanged, finalize, mergeMap, takeUntil, tap } from 'rxjs';
 import { FormsModule } from '@angular/forms';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FontAwesomeModule } from '@fortawesome/angular-fontawesome';
@@ -82,6 +82,8 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   playlistItemLimit!: number;
   splitByChapters: boolean;
   chapterTemplate: string;
+  clipStart = '';
+  clipEnd = '';
   subtitleLanguage: string;
   subtitleMode: string;
   ytdlOptionsPresets: string[] = [];
@@ -92,6 +94,9 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   cancelRequested = false;
   subscribeInProgress = false;
   checkIntervalMinutes = 60;
+  titleRegex = '';
+  editingTitleRegexId: string | null = null;
+  titleRegexEditDraft = '';
   cachedSubs: [string, SubscriptionRow][] = [];
   selectedSubscriptionIds = new Set<string>();
   checkingSubscriptionIds = new Set<string>();
@@ -106,8 +111,15 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   batchImportModalOpen = false;
   batchImportText = '';
   batchImportStatus = '';
+  batchImportCount = 0;
+  batchImportTotal = 0;
+  batchImportFailures = 0;
   importInProgress = false;
-  cancelImportFlag = false;
+  private batchImportCancel$ = new Subject<void>();
+  // Maximum number of /add requests to have in-flight at once during a batch
+  // import. Keeps the server from being hit with hundreds of simultaneous
+  // yt-dlp metadata extractions when a user pastes a huge URL list.
+  private static readonly BATCH_IMPORT_CONCURRENCY = 4;
   ytDlpOptionsUpdateTime: string | null = null;
   ytDlpVersion: string | null = null;
   metubeVersion: string | null = null;
@@ -234,6 +246,8 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     this.splitByChapters = this.cookieService.get('metube_split_chapters') === 'true';
     // Will be set from backend configuration, use empty string as placeholder
     this.chapterTemplate = this.cookieService.get('metube_chapter_template') || '';
+    this.clipStart = this.cookieService.get('metube_clip_start') || '';
+    this.clipEnd = this.cookieService.get('metube_clip_end') || '';
     this.subtitleLanguage = this.cookieService.get('metube_subtitle_language') || 'en';
     this.subtitleMode = this.cookieService.get('metube_subtitle_mode') || 'prefer_manual';
     this.outputDir = this.cookieService.get('metube_output_dir') || '';
@@ -569,6 +583,15 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       alert('Please enter a URL');
       return;
     }
+    const tr = (this.titleRegex || '').trim();
+    if (tr) {
+      try {
+        void RegExp(tr);
+      } catch {
+        alert('Invalid subscription title filter (regex)');
+        return;
+      }
+    }
     if (payload.splitByChapters && !payload.chapterTemplate.includes('%(section_number)')) {
       alert('Chapter template must include %(section_number)');
       return;
@@ -576,11 +599,16 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     if (!this.validateYtdlOptionsOverrides(payload.ytdlOptionsOverrides)) {
       return;
     }
+    // Subscriptions do not support clip ranges (backend rejects clip fields).
+    const { clipStart: _clipStart, clipEnd: _clipEnd, ...subscribeBase } = payload;
+    void _clipStart;
+    void _clipEnd;
     this.subscribeInProgress = true;
     this.subscriptionsSvc
       .subscribe({
-        ...payload,
+        ...subscribeBase,
         checkIntervalMinutes: this.checkIntervalMinutes,
+        titleRegex: tr,
       })
       .pipe(
         takeUntilDestroyed(this.destroyRef),
@@ -596,9 +624,42 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
             alert(r.msg || 'Subscribe failed');
           } else {
             this.addUrl = '';
+            this.titleRegex = '';
           }
         },
       });
+  }
+
+  beginEditTitleRegex(id: string, current: string | undefined) {
+    this.editingTitleRegexId = id;
+    this.titleRegexEditDraft = current ?? '';
+    this.cdr.markForCheck();
+  }
+
+  cancelEditTitleRegex() {
+    this.editingTitleRegexId = null;
+    this.titleRegexEditDraft = '';
+    this.cdr.markForCheck();
+  }
+
+  saveTitleRegex(id: string) {
+    const raw = (this.titleRegexEditDraft || '').trim();
+    if (raw) {
+      try {
+        void RegExp(raw);
+      } catch {
+        alert('Invalid subscription title filter (regex)');
+        return;
+      }
+    }
+    this.subscriptionsSvc.update(id, { title_regex: raw }).subscribe((res) => {
+      const error = this.getStatusError(res);
+      if (error) {
+        alert(error || 'Update subscription failed');
+        return;
+      }
+      this.cancelEditTitleRegex();
+    });
   }
 
   deleteSubscription(id: string) {
@@ -768,6 +829,14 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       this.chapterTemplate = typeof configuredTemplate === 'string' ? configuredTemplate : '';
     }
     this.cookieService.set('metube_chapter_template', this.chapterTemplate, { expires: this.settingsCookieExpiryDays });
+  }
+
+  clipStartChanged() {
+    this.cookieService.set('metube_clip_start', this.clipStart, { expires: this.settingsCookieExpiryDays });
+  }
+
+  clipEndChanged() {
+    this.cookieService.set('metube_clip_end', this.clipEnd, { expires: this.settingsCookieExpiryDays });
   }
 
   subtitleLanguageChanged() {
@@ -997,6 +1066,8 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       ytdlOptionsOverrides: allowYtdlOptionsOverrides
         ? (overrides.ytdlOptionsOverrides ?? this.ytdlOptionsOverrides)
         : '',
+      clipStart: overrides.clipStart ?? this.clipStart,
+      clipEnd: overrides.clipEnd ?? this.clipEnd,
     };
   }
 
@@ -1071,6 +1142,8 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
         ? [...download.ytdl_options_presets]
         : [],
       ytdlOptionsOverrides: download.ytdl_options_overrides ? JSON.stringify(download.ytdl_options_overrides) : '',
+      clipStart: download.clip_start != null ? String(download.clip_start) : '',
+      clipEnd: download.clip_end != null ? String(download.clip_end) : '',
     });
     this.downloads.delById('done', [key]).subscribe();
   }
@@ -1199,8 +1272,10 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     this.batchImportModalOpen = true;
     this.batchImportText = '';
     this.batchImportStatus = '';
+    this.batchImportCount = 0;
+    this.batchImportTotal = 0;
+    this.batchImportFailures = 0;
     this.importInProgress = false;
-    this.cancelImportFlag = false;
     setTimeout(() => {
       const textarea = document.getElementById('batch-import-textarea');
       if (textarea instanceof HTMLTextAreaElement) {
@@ -1226,48 +1301,63 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       return;
     }
     this.importInProgress = true;
-    this.cancelImportFlag = false;
-    this.batchImportStatus = `Starting to import ${urls.length} URLs...`;
-    let index = 0;
-    const delayBetween = 1000;
-    const processNext = () => {
-      if (this.cancelImportFlag) {
-        this.batchImportStatus = `Import cancelled after ${index} of ${urls.length} URLs.`;
-        this.importInProgress = false;
-        return;
-      }
-      if (index >= urls.length) {
-        this.batchImportStatus = `Finished importing ${urls.length} URLs.`;
-        this.importInProgress = false;
-        return;
-      }
-      const url = urls[index];
-      this.batchImportStatus = `Importing URL ${index + 1} of ${urls.length}: ${url}`;
-      // Pass current selection options to backend
-      this.downloads.add(this.buildAddPayload({ url }))
-        .subscribe({
-          next: (status: Status) => {
+    this.batchImportCount = 0;
+    this.batchImportFailures = 0;
+    this.batchImportTotal = urls.length;
+    this.updateBatchImportStatus();
+
+    from(urls).pipe(
+      mergeMap(
+        url => this.downloads.add(this.buildAddPayload({ url })).pipe(
+          // downloads.add() already catches HTTP errors and emits a single
+          // Status value, so `tap` (not `finalize`) is the right place to
+          // count. This avoids incrementing the counter when an in-flight
+          // request is aborted by cancellation.
+          tap((status: Status) => {
             if (status.status === 'error') {
-              alert(`Error adding URL ${url}: ${status.msg}`);
+              this.batchImportFailures++;
+              console.error(`Error adding URL ${url}: ${status.msg}`);
             }
-            index++;
-            setTimeout(processNext, delayBetween);
-          },
-          error: (err) => {
-            console.error(`Error importing URL ${url}:`, err);
-            index++;
-            setTimeout(processNext, delayBetween);
-          }
-        });
-    };
-    processNext();
+            this.batchImportCount++;
+            this.updateBatchImportStatus();
+            this.cdr.markForCheck();
+          }),
+        ),
+        App.BATCH_IMPORT_CONCURRENCY,
+      ),
+      takeUntil(this.batchImportCancel$),
+      takeUntilDestroyed(this.destroyRef),
+      finalize(() => {
+        this.importInProgress = false;
+        this.updateBatchImportStatus(true);
+        this.cdr.markForCheck();
+      }),
+    ).subscribe();
   }
 
-  // Cancel the batch import process
+  private updateBatchImportStatus(done = false): void {
+    const parts: string[] = [];
+    if (done) {
+      const processed = this.batchImportCount;
+      if (processed < this.batchImportTotal) {
+        parts.push(`Import cancelled after ${processed} of ${this.batchImportTotal} URLs.`);
+      } else {
+        parts.push(`Finished importing ${this.batchImportTotal} URLs.`);
+      }
+    } else {
+      parts.push(`Importing ${this.batchImportCount} of ${this.batchImportTotal} URLs...`);
+    }
+    if (this.batchImportFailures > 0) {
+      parts.push(`${this.batchImportFailures} failed.`);
+    }
+    this.batchImportStatus = parts.join(' ');
+  }
+
+  // Cancel the batch import process: aborts in-flight and pending requests
+  // immediately via the cancellation Subject wired into the pipeline.
   cancelBatchImport(): void {
     if (this.importInProgress) {
-      this.cancelImportFlag = true;
-      this.batchImportStatus += ' Cancelling...';
+      this.batchImportCancel$.next();
     }
   }
 

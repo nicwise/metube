@@ -435,6 +435,34 @@
                     }
                   </div>
                 </div>
+                @if (downloadType === 'video' || downloadType === 'audio') {
+                <div class="col-md-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Clip start</span>
+                    <input type="text"
+                      class="form-control"
+                      name="clipStart"
+                      [(ngModel)]="clipStart"
+                      (change)="clipStartChanged()"
+                      placeholder="e.g. 2:26"
+                      [disabled]="addInProgress || subscribeInProgress || downloads.loading"
+                      ngbTooltip="Optional start time (seconds, M:SS, or H:MM:SS). Blank = from start or YouTube &t= in URL.">
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Clip end</span>
+                    <input type="text"
+                      class="form-control"
+                      name="clipEnd"
+                      [(ngModel)]="clipEnd"
+                      (change)="clipEndChanged()"
+                      placeholder="e.g. 3:24"
+                      [disabled]="addInProgress || subscribeInProgress || downloads.loading"
+                      ngbTooltip="Optional end time. Blank = until end of media.">
+                  </div>
+                </div>
+                }
               </div>
 
               <!-- Behavior -->
@@ -480,6 +508,18 @@
                       (ngModelChange)="checkIntervalChanged()"
                       [disabled]="addInProgress || subscribeInProgress || downloads.loading"
                       ngbTooltip="How often to poll subscriptions for new videos">
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Subscription Title Filter</span>
+                    <input type="text"
+                      class="form-control"
+                      name="titleRegex"
+                      [(ngModel)]="titleRegex"
+                      [disabled]="addInProgress || subscribeInProgress || downloads.loading"
+                      placeholder="Optional regex"
+                      ngbTooltip="In subscriptions, only titles matching this Python-style regex are queued. Empty = all. Case-sensitive; use (?i) in the pattern for case-insensitive.">
                   </div>
                 </div>
               </div>
@@ -614,6 +654,19 @@
           <div class="mt-2">
             @if (batchImportStatus) {
               <small>{{ batchImportStatus }}</small>
+            }
+            @if (batchImportTotal > 0) {
+              <div class="progress mt-2" style="height: 20px;">
+                <div class="progress-bar"
+                  [class.bg-danger]="batchImportFailures > 0"
+                  role="progressbar"
+                  [style.width.%]="(batchImportCount / batchImportTotal) * 100"
+                  [attr.aria-valuenow]="batchImportCount"
+                  [attr.aria-valuemin]="0"
+                  [attr.aria-valuemax]="batchImportTotal">
+                  {{ batchImportCount }} / {{ batchImportTotal }}
+                </div>
+              </div>
             }
           </div>
         </div>
@@ -881,6 +934,8 @@
           </th>
           <th scope="col">Name</th>
           <th scope="col">URL</th>
+          <th scope="col" class="text-nowrap"
+            ngbTooltip="Subscriptions only — which new video titles to queue when this feed is checked. Does not affect manual downloads.">Sub. title filter</th>
           <th scope="col" class="text-nowrap">Interval (min)</th>
           <th scope="col" class="text-nowrap">Last checked</th>
           <th scope="col">Status</th>
@@ -899,6 +954,32 @@
             </td>
             <td>{{ entry[1].name }}</td>
             <td class="text-break"><a [href]="entry[1].url" target="_blank" rel="noopener">{{ entry[1].url }}</a></td>
+            <td>
+              @if (editingTitleRegexId === entry[0]) {
+                <div class="d-flex flex-wrap gap-1 align-items-center">
+                  <input type="text"
+                    class="form-control form-control-sm flex-grow-1"
+                    [name]="'subTitleRegex' + entry[0]"
+                    [(ngModel)]="titleRegexEditDraft"
+                    [disabled]="downloads.loading" />
+                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                    (click)="saveTitleRegex(entry[0])"
+                    [disabled]="downloads.loading">Save</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary"
+                    (click)="cancelEditTitleRegex()"
+                    [disabled]="downloads.loading">Cancel</button>
+                </div>
+              } @else {
+                <div class="d-flex flex-wrap gap-1 align-items-center">
+                  <span class="text-muted small text-break"
+                    [class.text-secondary]="!entry[1].title_regex">{{ entry[1].title_regex || '—' }}</span>
+                  <button type="button" class="btn btn-link btn-sm p-0"
+                    (click)="beginEditTitleRegex(entry[0], entry[1].title_regex)"
+                    [disabled]="downloads.loading"
+                    ngbTooltip="Edit subscription title filter (subscriptions only; not for one-off downloads)">Edit</button>
+                </div>
+              }
+            </td>
             <td>{{ entry[1].check_interval_minutes }}</td>
             <td class="text-nowrap">
               @if (entry[1].last_checked !== null) {

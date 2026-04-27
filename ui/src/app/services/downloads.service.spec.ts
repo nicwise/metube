@@ -41,6 +41,8 @@ function basePayload(): AddDownloadPayload {
     subtitleMode: 'prefer_manual',
     ytdlOptionsPresets: [],
     ytdlOptionsOverrides: '',
+    clipStart: '',
+    clipEnd: '',
   };
 }
 
@@ -83,6 +85,24 @@ describe('DownloadsService', () => {
         subtitle_mode: 'prefer_manual',
         ytdl_options_presets: [],
         ytdl_options_overrides: '',
+      }),
+    );
+    req.flush({ status: 'ok' });
+  });
+
+  it('add() sends clip_start and clip_end when set', () => {
+    service
+      .add({
+        ...basePayload(),
+        clipStart: '1:00',
+        clipEnd: '2:00',
+      })
+      .subscribe();
+    const req = httpMock.expectOne('add');
+    expect(req.request.body).toEqual(
+      expect.objectContaining({
+        clip_start: '1:00',
+        clip_end: '2:00',
       }),
     );
     req.flush({ status: 'ok' });

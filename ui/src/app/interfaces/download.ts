@@ -17,6 +17,8 @@ export interface Download {
   subtitle_mode?: string;
   ytdl_options_presets?: string[];
   ytdl_options_overrides?: Record<string, unknown>;
+  clip_start?: number;
+  clip_end?: number;
   status: string;
   msg: string;
   percent: number;

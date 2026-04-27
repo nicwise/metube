@@ -63,13 +63,19 @@ class DownloadsServiceStub {
 class SubscriptionsServiceStub {
   subscriptions = new Map();
   subscriptionsChanged = new Subject<void>();
+  subscribeCalls: unknown[] = [];
 
-  subscribe() {
+  subscribe(payload: unknown) {
+    this.subscribeCalls.push(payload);
     return of({ status: 'ok' as const });
   }
 
   delete() {
     return of({});
+  }
+
+  update() {
+    return of({ status: 'ok' as const });
   }
 
   refreshList() {
@@ -174,5 +180,54 @@ describe('App', () => {
     const payload = app['buildAddPayload']();
 
     expect(payload.ytdlOptionsOverrides).toBe('');
+  });
+
+  it('includes titleRegex in subscribe payload', () => {
+    const fixture = TestBed.createComponent(App);
+    const app = fixture.componentInstance;
+    const subs = TestBed.inject(SubscriptionsService) as unknown as SubscriptionsServiceStub;
+    app.addUrl = 'https://example.com/channel';
+    app.titleRegex = 'EPISODE';
+    app.addSubscription();
+    expect(subs.subscribeCalls.length).toBe(1);
+    const payload = subs.subscribeCalls[0] as { titleRegex: string };
+    expect(payload.titleRegex).toBe('EPISODE');
+  });
+
+  it('omits clip fields from subscribe payload', () => {
+    const fixture = TestBed.createComponent(App);
+    const app = fixture.componentInstance;
+    const subs = TestBed.inject(SubscriptionsService) as unknown as SubscriptionsServiceStub;
+    app.addUrl = 'https://example.com/channel';
+    app.clipStart = '1:00';
+    app.clipEnd = '2:00';
+    app.addSubscription();
+    expect(subs.subscribeCalls.length).toBe(1);
+    const payload = subs.subscribeCalls[0] as Record<string, unknown>;
+    expect('clipStart' in payload).toBe(false);
+    expect('clipEnd' in payload).toBe(false);
+  });
+
+  it('buildAddPayload includes clip times', () => {
+    const fixture = TestBed.createComponent(App);
+    const app = fixture.componentInstance;
+    app.clipStart = '0:10';
+    app.clipEnd = '1:20';
+    const payload = app['buildAddPayload']();
+    expect(payload.clipStart).toBe('0:10');
+    expect(payload.clipEnd).toBe('1:20');
+  });
+
+  it('blocks subscribe with invalid title regex', () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    const fixture = TestBed.createComponent(App);
+    const app = fixture.componentInstance;
+    const subs = TestBed.inject(SubscriptionsService) as unknown as SubscriptionsServiceStub;
+    app.addUrl = 'https://example.com/channel';
+    app.titleRegex = '[';
+    app.addSubscription();
+    expect(subs.subscribeCalls.length).toBe(0);
+    expect(alertSpy).toHaveBeenCalledWith('Invalid subscription title filter (regex)');
+    alertSpy.mockRestore();
   });
 });

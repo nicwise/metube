@@ -14,6 +14,7 @@ import logging
 import json
 import pathlib
 import re
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from watchfiles import DefaultFilter, Change, awatch
 
 from ytdl import DownloadQueueNotifier, DownloadQueue, Download
@@ -60,6 +61,7 @@ class Config:
         'YTDL_OPTIONS_PRESETS': '{}',
         'YTDL_OPTIONS_PRESETS_FILE': '',
         'ALLOW_YTDL_OPTIONS_OVERRIDES': 'false',
+        'CORS_ALLOWED_ORIGINS': '',
         'ROBOTS_TXT': '',
         'HOST': '0.0.0.0',
         'PORT': '8081',
@@ -91,6 +93,11 @@ class Config:
 
         if not self.URL_PREFIX.endswith('/'):
             self.URL_PREFIX += '/'
+
+        for attr in ('PUBLIC_HOST_URL', 'PUBLIC_HOST_AUDIO_URL'):
+            val = getattr(self, attr)
+            if val and not val.endswith('/'):
+                setattr(self, attr, val + '/')
 
         # Convert relative addresses to absolute addresses to prevent the failure of file address comparison
         if self.YTDL_OPTIONS_FILE and self.YTDL_OPTIONS_FILE.startswith('.'):
@@ -234,7 +241,8 @@ class ObjectSerializer(json.JSONEncoder):
 
 serializer = ObjectSerializer()
 app = web.Application()
-sio = socketio.AsyncServer(cors_allowed_origins='*')
+_cors_origins = [o.strip() for o in config.CORS_ALLOWED_ORIGINS.split(',') if o.strip()] if config.CORS_ALLOWED_ORIGINS else []
+sio = socketio.AsyncServer(cors_allowed_origins=_cors_origins if _cors_origins else [])
 sio.attach(app, socketio_path=config.URL_PREFIX + 'socket.io')
 routes = web.RouteTableDef()
 VALID_SUBTITLE_FORMATS = {'srt', 'txt', 'vtt', 'ttml', 'sbv', 'scc', 'dfxp'}
@@ -262,6 +270,115 @@ def _parse_ytdl_options_overrides(value, *, enabled: bool) -> dict:
         raise web.HTTPBadRequest(reason='ytdl_options_overrides are disabled')
 
     return value
+
+
+_YOUTUBE_T_COMPACT_RE = re.compile(
+    r'^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)(?:s)?)?$',
+    re.IGNORECASE,
+)
+
+
+def _parse_youtube_t_compact(value: str) -> float | None:
+    """Parse YouTube-style ``t`` values: ``885``, ``885s``, ``14m45s``, ``1h2m3s``."""
+    v = value.strip()
+    if not v:
+        return None
+    if re.fullmatch(r'-?\d+(\.\d+)?', v):
+        sec = float(v)
+        return sec if sec >= 0 else None
+    m = _YOUTUBE_T_COMPACT_RE.match(v)
+    if m and any(m.groups()):
+        hours = int(m.group(1) or 0)
+        minutes = int(m.group(2) or 0)
+        seconds = int(m.group(3) or 0)
+        total = hours * 3600 + minutes * 60 + seconds
+        return float(total) if total >= 0 else None
+    return None
+
+
+def _parse_clock_timestamp(s: str) -> float:
+    """Parse ``MM:SS``, ``H:MM:SS``, or single segment as seconds (with optional decimals)."""
+    part = s.strip()
+    if not part:
+        raise ValueError('empty timestamp')
+    segments = part.split(':')
+    if len(segments) > 3:
+        raise ValueError('too many segments')
+    try:
+        nums = [float(x) for x in segments]
+    except ValueError as exc:
+        raise ValueError('invalid number') from exc
+    if any(x < 0 for x in nums):
+        raise ValueError('negative segment')
+    if len(segments) == 1:
+        return nums[0]
+    if len(segments) == 2:
+        return nums[0] * 60 + nums[1]
+    return nums[0] * 3600 + nums[1] * 60 + nums[2]
+
+
+def _parse_clip_timestamp_value(value) -> float:
+    """Coerce a clip boundary from JSON to seconds (non-negative)."""
+    if isinstance(value, bool):
+        raise web.HTTPBadRequest(reason='clip timestamp must be a number or string')
+    if isinstance(value, (int, float)):
+        if value < 0:
+            raise web.HTTPBadRequest(reason='clip timestamp must be non-negative')
+        return float(value)
+    s = str(value).strip()
+    if not s:
+        raise web.HTTPBadRequest(reason='clip timestamp cannot be empty')
+    if ':' in s:
+        try:
+            return _parse_clock_timestamp(s)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(reason='invalid clip timestamp format') from exc
+    compact = _parse_youtube_t_compact(s)
+    if compact is not None:
+        return compact
+    raise web.HTTPBadRequest(reason='invalid clip timestamp format')
+
+
+def _optional_clip_field(raw) -> float | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    return _parse_clip_timestamp_value(raw)
+
+
+def _clip_field_provided_in_post(raw) -> bool:
+    if raw is None:
+        return False
+    if isinstance(raw, str) and not raw.strip():
+        return False
+    return True
+
+
+def _extract_t_query_from_url(url: str) -> tuple[str, float | None]:
+    """If ``t=`` is present and parseable, return URL without ``t`` and start seconds."""
+    try:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+    except Exception:
+        return url, None
+    t_values = params.get('t')
+    if not t_values:
+        return url, None
+    start = _parse_youtube_t_compact(t_values[0])
+    if start is None:
+        return url, None
+    filtered = {k: v for k, v in params.items() if k != 't'}
+    new_query = urlencode(filtered, doseq=True)
+    cleaned = urlunparse((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        parsed.params,
+        new_query,
+        parsed.fragment,
+    ))
+    return cleaned, float(start)
 
 
 def _parse_ytdl_options_presets(post: dict) -> list[str]:
@@ -551,6 +668,39 @@ def parse_download_options(post: dict) -> dict:
     except (TypeError, ValueError) as exc:
         raise web.HTTPBadRequest(reason='playlist_item_limit must be an integer') from exc
 
+    clip_start_raw = post.get('clip_start')
+    clip_end_raw = post.get('clip_end')
+    clip_start: float | None
+    clip_end: float | None
+    if download_type in ('captions', 'thumbnail'):
+        if _clip_field_provided_in_post(clip_start_raw) or _clip_field_provided_in_post(clip_end_raw):
+            raise web.HTTPBadRequest(
+                reason='clip_start and clip_end are only supported for video and audio downloads',
+            )
+        clip_start = None
+        clip_end = None
+    else:
+        cleaned_url, url_t = _extract_t_query_from_url(url)
+        if url_t is not None:
+            url = cleaned_url
+        explicit_start = _optional_clip_field(clip_start_raw)
+        explicit_end = _optional_clip_field(clip_end_raw)
+        explicit_start_provided = _clip_field_provided_in_post(clip_start_raw)
+        explicit_end_provided = _clip_field_provided_in_post(clip_end_raw)
+        if explicit_start_provided:
+            clip_start = explicit_start
+        elif explicit_end_provided:
+            clip_start = 0.0
+        elif url_t is not None:
+            clip_start = url_t
+        else:
+            clip_start = None
+        clip_end = explicit_end
+        if clip_end is not None and clip_start is None:
+            clip_start = 0.0
+        if clip_start is not None and clip_end is not None and clip_end <= clip_start:
+            raise web.HTTPBadRequest(reason='clip_end must be greater than clip_start')
+
     return {
         'url': url,
         'download_type': download_type,
@@ -568,6 +718,8 @@ def parse_download_options(post: dict) -> dict:
         'subtitle_mode': subtitle_mode,
         'ytdl_options_presets': ytdl_options_presets,
         'ytdl_options_overrides': ytdl_options_overrides,
+        'clip_start': clip_start,
+        'clip_end': clip_end,
     }
 
 
@@ -605,6 +757,8 @@ async def add(request):
         o['subtitle_mode'],
         o['ytdl_options_presets'],
         o['ytdl_options_overrides'],
+        o['clip_start'],
+        o['clip_end'],
     )
     return web.Response(text=serializer.encode(status))
 
@@ -638,6 +792,8 @@ async def subscribe(request):
         raise web.HTTPBadRequest(reason='check_interval_minutes must be an integer') from exc
     if cic < 1:
         raise web.HTTPBadRequest(reason='check_interval_minutes must be at least 1')
+    if o.get('clip_start') is not None or o.get('clip_end') is not None:
+        raise web.HTTPBadRequest(reason='clip options are not supported for subscriptions')
 
     result = await submgr.add_subscription(
         o['url'],
@@ -657,6 +813,7 @@ async def subscribe(request):
         subtitle_mode=o['subtitle_mode'],
         ytdl_options_presets=o['ytdl_options_presets'],
         ytdl_options_overrides=o['ytdl_options_overrides'],
+        title_regex=post.get('title_regex'),
     )
     return web.Response(text=serializer.encode(result))
 
@@ -672,7 +829,11 @@ async def subscriptions_update(request):
     sub_id = post.get('id')
     if not sub_id:
         raise web.HTTPBadRequest(reason='missing subscription id')
-    changes = {k: v for k, v in post.items() if k != 'id' and k in ('enabled', 'check_interval_minutes', 'name')}
+    changes = {
+        k: v
+        for k, v in post.items()
+        if k != 'id' and k in ('enabled', 'check_interval_minutes', 'name', 'title_regex')
+    }
     if not changes:
         raise web.HTTPBadRequest(reason='no valid fields to update')
     log.info("Subscription update requested for %s: %s", sub_id, sorted(changes.keys()))
@@ -936,8 +1097,9 @@ app.router.add_route('OPTIONS', config.URL_PREFIX + 'upload-cookies', add_cors)
 app.router.add_route('OPTIONS', config.URL_PREFIX + 'delete-cookies', add_cors)
 
 async def on_prepare(request, response):
-    if 'Origin' in request.headers:
-        response.headers['Access-Control-Allow-Origin'] = request.headers['Origin']
+    origin = request.headers.get('Origin')
+    if origin and _cors_origins and ('*' in _cors_origins or origin in _cors_origins):
+        response.headers['Access-Control-Allow-Origin'] = origin
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
 
 app.on_response_prepare.append(on_prepare)
